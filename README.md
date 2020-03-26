@@ -15,7 +15,12 @@ difficulty on systems that satisfy the following dependency list:
 - systemd,
 - curl,
 - unzip,
-- jq
+- jq,
+- have vpnfailsafe.sh script in /etc/openvpn
+
+You may also want to consider disabling ipv6 during connection by editing
+corresponding lines in "disable/enable_ipv6()" in order to protect against
+ipv6 leaking.
 
 Quickstart
 ----------
@@ -24,9 +29,9 @@ Quickstart
 configuration files.
 - Edit `/etc/openvpn/client/nordvpn/credentials.conf`.
 - Run `sudo nordvpn connect` to connect to a recommended nordvpn server.
-- Or run `sudo nordvpn connect server_name` to connect to this server 
+- Run `sudo nordvpn connect server_name` to connect to this server 
 (i.e. "us1234"). Only UDP connections are available.
-- Or run `sudo nordvpn connect country_name` to connect to a recommended
+- Run `sudo nordvpn connect country_name` to connect to a recommended
 server in this country (i.e. "us", "germany", etc.).
 - The status command shows you the status of the systemd service.
 - Run `sudo nordvpn disconnect` to end the connection.

@@ -20,20 +20,29 @@ main() {
                 ;;
             disconnect)
                 check_root
-                service=$(get_service)
-                test -z "$service" || systemctl stop $service
+                stop_service > /dev/null
+                reenable_ipv6
                 break
                 ;;
             connect)
                 shift
                 check_root
+                service=$(stop_service)
+
                 server=$(find_server "$@")
-                if [[ $? != 0 ]]; then
-                    echo "No valid country found."
-                    break
+                if [[ $? != 0
+                      || ! -f /etc/openvpn/client/nordvpn_${server}_udp.conf ]]; then
+                    if [[ "$service" == "" ]]; then
+                        exit_msg 1 "'No valid nordvpn server found. Exiting."
+                    else
+                        echo "No valid nordvpn server found."\
+                             "Resuming previous connection."
+                        systemctl start "$service"
+                        break
+                    fi
                 fi
-                test -f /etc/openvpn/client/nordvpn_${server}_udp.conf \
-                    || exit_msg 1 "'${1}' is not a valid nordvpn server. Exiting."
+
+                disable_ipv6
                 systemctl start openvpn-client@nordvpn_${server}_udp
                 break
                 ;;
@@ -43,6 +52,36 @@ main() {
                 ;;
         esac
     done
+}
+
+disable_ipv6() {
+    ## Disable ipv6 on every interface during the connection
+    #sysctl -w net.ipv6.conf.all.disable_ipv6=1 > /dev/null 2>&1 
+    #sysctl -w net.ipv6.conf.default.disable_ipv6=1 > /dev/null 2>&1 
+
+    ## Interfaces can be found by running `ip link`
+    #sysctl -w net.ipv6.conf.lo.disable_ipv6=1 > /dev/null 2>&1 
+    #sysctl -w net.ipv6.conf.tun0.disable_ipv6=1 > /dev/null 2>&1 
+    #sysctl -w net.ipv6.conf.YOUR_INTERFACE.disable_ipv6=1 > /dev/null 2>&1 
+    return 0
+}
+
+reenable_ipv6() {
+    #sysctl -w net.ipv6.conf.all.disable_ipv6=0 > /dev/null 2>&1 
+    #sysctl -w net.ipv6.conf.default.disable_ipv6=0 > /dev/null 2>&1 
+    #sysctl -w net.ipv6.conf.lo.disable_ipv6=0 > /dev/null 2>&1 
+    #sysctl -w net.ipv6.conf.tun0.disable_ipv6=0 > /dev/null 2>&1 
+    #sysctl -w net.ipv6.conf.YOUR_INTERFACE.disable_ipv6=0 > /dev/null 2>&1 
+    return 0
+}
+
+stop_service() {
+    service=$(get_service)
+    if [[ ! -z "$service" ]]; then
+        systemctl stop $service
+        systemctl restart iptables.service
+    fi
+    echo "$service"
 }
 
 exit_msg() {
@@ -69,6 +108,13 @@ update_files() {
 
     local tmpdir=$(mktemp -d)
     cd $tmpdir
+
+    updown=/etc/openvpn/client/nordvpn/updown
+    if [ -x /etc/openvpn/vpnfailsafe.sh ]; then
+        ln -fs /etc/openvpn/vpnfailsafe.sh $updown
+    else
+        msg_exit 2 "Install vpnfailsafe.sh to proceed."
+    fi
 
     echo "Downloading nordvpn config files..."
     curl -sSL -o nordvpn.zip  $remote_url || exit 1
@@ -139,6 +185,7 @@ patch_config_file() {
     echo "script-security 2" >> $f
     echo "up /etc/openvpn/client/nordvpn/updown" >> $f
     echo "down /etc/openvpn/client/nordvpn/updown" >> $f
+    echo "route-noexec" >> $f
     install -D -m 444 $f $targetdir/conf/$(basename $f)
     local -a tok=($(basename $f | tr '.' ' '))
     ln -s $targetdir/conf/$(basename $f) $targetdir/../nordvpn_${tok[0]}_${tok[3]:0:3}.conf
