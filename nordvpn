@@ -1,0 +1,170 @@
+#!/bin/bash
+
+main() {
+    while [ $# -ne 0 ]
+    do
+        case "$1" in
+            -h|--help)
+                print_usage
+                break
+                ;;
+            status)
+                service=$(get_service)
+                test -z "$service" || systemctl status $service
+                break
+                ;;
+            update)
+                check_root
+                update_files
+                break
+                ;;
+            disconnect)
+                check_root
+                service=$(get_service)
+                test -z "$service" || systemctl stop $service
+                break
+                ;;
+            connect)
+                shift
+                check_root
+                server=$(find_server "$@")
+                if [[ $? != 0 ]]; then
+                    echo "No valid country found."
+                    break
+                fi
+                test -f /etc/openvpn/client/nordvpn_${server}_udp.conf \
+                    || exit_msg 1 "'${1}' is not a valid nordvpn server. Exiting."
+                systemctl start openvpn-client@nordvpn_${server}_udp
+                break
+                ;;
+            *)
+                print_usage
+                exit 1
+                ;;
+        esac
+    done
+}
+
+exit_msg() {
+    (>&2 echo "$2")
+    exit $1
+}
+
+get_service() {
+    systemctl --type=service --plain | grep openvpn-client@nordvpn | awk '{print $1}'
+}
+
+check_root() {
+    if [ $(id -u) -ne 0 ]
+    then
+        exit_msg 1 "This command requires super-user privileges."
+    fi
+}
+
+update_files() {
+    local remote_url=https://nordvpn.com/api/files/zipv2
+
+    local targetdir=/etc/openvpn/client/nordvpn
+    mkdir -p $targetdir
+
+    local tmpdir=$(mktemp -d)
+    cd $tmpdir
+
+    echo "Downloading nordvpn config files..."
+    curl -sSL -o nordvpn.zip  $remote_url || exit 1
+    mkdir conf
+    if ! unzip -q nordvpn.zip -d conf
+    then
+        msg_exit 2 "unzip failed"
+    fi
+
+    echo "Patching and installing files..."
+    test -f $targetdir/credentials.conf && cp $targetdir/credentials.conf .
+    find /etc/openvpn/client -name 'nordvpn_*.conf' | xargs -r rm
+    rm -rf $targetdir/conf && mkdir -p $targetdir/conf
+
+    export -f patch_config_file
+    find conf -name '*.ovpn' | xargs -P $(($(nproc --all)-1)) -n1 -I{} bash -c "patch_config_file {} $targetdir"
+
+    local cred_file=$targetdir/credentials.conf
+    if [ -f credentials.conf ]; then
+        cp credentials.conf $cred_file
+    else
+        echo "login" > $cred_file
+        echo "password" >> $cred_file
+        chmod 400 $cred_file
+        echo "Please update $cred_file"
+    fi
+
+    rm -rf $tmpdir
+}
+
+find_server() {
+    var="$@"
+    if [[ "$var" =~ [0-9] ]]; then
+        echo "$var"
+        return 0
+    fi
+
+    url_countries="https://api.nordvpn.com/v1/servers/countries"
+    url_recommendations="https://api.nordvpn.com/v1/servers/recommendations"
+
+    if [[ -z $var ]]; then
+        res=$(curl --silent "$url_recommendations?limit=1" \
+            | jq -Mr '.[].hostname')
+        echo ${res%%\.*}
+        return 0
+    fi
+
+    country=$(curl --silent $url_countries | jq -Mr --arg var "$var" \
+        '.[] | select(.code | test($var;"i")) | .id')
+    if [[ -z $country ]]; then
+        country=$(curl --silent $url_countries | jq -Mr --arg var "$var" \
+            '.[] | select(.name | test($var;"i")) | .id')
+    fi
+    if [[ -z $country ]]; then
+        return 1
+    fi
+    res=$(curl --silent "$url_recommendations?filters\[country_id\]=$country&limit=1" \
+        | jq -Mr '.[].hostname')
+    echo ${res%%\.*}
+} 
+
+patch_config_file() {
+    local -r f=$1
+    local -r targetdir=$2
+
+    sed 's/^auth-user-pass.*$/auth-user-pass \/etc\/openvpn\/client\/nordvpn\/credentials.conf/g' -i $f
+    echo "" >> $f
+    echo "script-security 2" >> $f
+    echo "up /etc/openvpn/client/nordvpn/updown" >> $f
+    echo "down /etc/openvpn/client/nordvpn/updown" >> $f
+    install -D -m 444 $f $targetdir/conf/$(basename $f)
+    local -a tok=($(basename $f | tr '.' ' '))
+    ln -s $targetdir/conf/$(basename $f) $targetdir/../nordvpn_${tok[0]}_${tok[3]:0:3}.conf
+}
+
+print_usage() {
+    cat <<EOF
+usage: $(basename $0) [options] command [args]
+
+Available options:
+    -h, --help
+        Print this help and exit.
+
+Available commands:
+    status
+        Show current systemd service status, if any.
+    connect [arg]
+        If no 'arg' is supplied connects to a recommended server. If 'arg' is
+        a server code connects to it. Otherwise 'arg' is assumed to be a
+        country code ("us", "de", etc.) or name. The command then connects to
+        a recommended server in this country.
+    disconnect
+        Disconnect from VPN service if it is running.
+    update
+        Download and install nordvpn config files.
+EOF
+}
+
+main "$@"
